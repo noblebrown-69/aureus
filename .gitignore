@@ -1,0 +1,26 @@
+# Build artifacts
+Aureus
+*.o
+*.exe
+
+# Database files
+*.db
+vibe_journal.db
+
+# IDE/Editor files
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp
+autosave.temp
+
+# Logs
+*.log
