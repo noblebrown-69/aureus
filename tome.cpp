@@ -160,8 +160,8 @@ JournalApp::JournalApp() {
         db_path_ = "aureus.db";
     }
 
-    // read last db from config file
-    std::string config_file = std::string(getenv("HOME")) + "/.aureus_last_db";
+    // read last db from config file (next to executable)
+    std::string config_file = std::string(exe_dir ? exe_dir : ".") + "/.aureus_last_db";
     std::ifstream ifs(config_file);
     if (ifs.is_open()) {
         std::string line;
@@ -187,6 +187,10 @@ JournalApp::JournalApp() {
         switch_db(db_path_);
     } else {
         load_chapters();
+        // write config file with current db_path_
+        std::string config_file = std::string(exe_dir ? exe_dir : ".") + "/.aureus_last_db";
+        std::ofstream ofs(config_file);
+        ofs << db_path_ << std::endl;
     }
 
     // build the user interface
@@ -635,8 +639,15 @@ void JournalApp::switch_db(const std::string& new_path) {
     }
     db_ = new_db;
     db_path_ = new_path;
-    // write to config file
-    std::string config_file = std::string(getenv("HOME")) + "/.aureus_last_db";
+    // write to config file (next to executable)
+    char exe_path[PATH_MAX];
+    char* exe_dir = nullptr;
+    ssize_t len = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
+    if (len != -1) {
+        exe_path[len] = '\0';
+        exe_dir = dirname(exe_path);
+    }
+    std::string config_file = std::string(exe_dir ? exe_dir : ".") + "/.aureus_last_db";
     std::ofstream ofs(config_file);
     ofs << db_path_ << std::endl;
     init_db();

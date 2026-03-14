@@ -7,6 +7,9 @@ Aureus
 *.db
 aureus.db
 
+# Config files
+.aureus_last_db
+
 # IDE/Editor files
 .vscode/
 *.swp
