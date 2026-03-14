@@ -10,7 +10,7 @@
 //  * Toolbar with New/Save/Delete/Export buttons, search box, font size
 //    selector and dark‑mode toggle
 //  * CSS theming (deep blue default, black for dark mode, monospace font)
-//  * SQLite3 storage in "vibe_journal.db" next to the executable
+//  * SQLite3 storage in "aureus.db" next to the executable
 //  * Basic prefs table for persisting dark mode and font size
 //  * Autosave drafts every five minutes to "autosave.temp"
 //  * Export current entry to a sanitized Markdown file
@@ -112,6 +112,10 @@ private:
     void delete_chapter(int chapter_id);
     void show_chapter_menu(int chapter_id, GdkEventButton* event);
     void move_entry_to_chapter(int entry_id, int chapter_id);
+    void switch_db(const std::string& new_path);
+    void on_new_book();
+    void on_open_book();
+    void on_save_as();
 
     // static callbacks
     static void on_search_changed(GtkEditable* editable, gpointer user_data);
@@ -136,6 +140,9 @@ private:
     static void on_drag_begin(GtkWidget* widget, GdkDragContext* context, gpointer user_data);
     static void on_drag_data_get(GtkWidget* widget, GdkDragContext* context, GtkSelectionData* selection_data, guint info, guint time, gpointer user_data);
     static void on_drag_data_received(GtkWidget* widget, GdkDragContext* context, gint x, gint y, GtkSelectionData* selection_data, guint info, guint time, gpointer user_data);
+    static void on_new_book_button_static(GtkButton* button, gpointer user_data);
+    static void on_open_book_button_static(GtkButton* button, gpointer user_data);
+    static void on_save_as_button_static(GtkButton* button, gpointer user_data);
 };
 
 // --- implementation -------------------------------------------------------
@@ -143,23 +150,44 @@ private:
 JournalApp::JournalApp() {
     // determine path of executable so we can store DB next to it
     char exe_path[PATH_MAX];
+    char* exe_dir = nullptr;
     ssize_t len = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
     if (len != -1) {
         exe_path[len] = '\0';
-        char* exe_dir = dirname(exe_path);
-        db_path_ = std::string(exe_dir) + "/vibe_journal.db";
+        exe_dir = dirname(exe_path);
+        db_path_ = std::string(exe_dir) + "/aureus.db";
     } else {
-        db_path_ = "vibe_journal.db";
+        db_path_ = "aureus.db";
     }
 
+    // read last db from config file
+    std::string config_file = std::string(getenv("HOME")) + "/.aureus_last_db";
+    std::ifstream ifs(config_file);
+    if (ifs.is_open()) {
+        std::string line;
+        if (std::getline(ifs, line) && !line.empty()) {
+            db_path_ = line;
+        }
+    }
+
+    std::string initial_db_path = db_path_;
+
     if (sqlite3_open(db_path_.c_str(), &db_) != SQLITE_OK) {
-        std::cerr << "Can't open database: " << sqlite3_errmsg(db_) << '\n';
-        std::exit(1);
+        std::cerr << "Can't open database: " << sqlite3_errmsg(db_) << ", falling back to default\n";
+        db_path_ = std::string(exe_dir ? exe_dir : ".") + "/aureus.db";
+        if (sqlite3_open(db_path_.c_str(), &db_) != SQLITE_OK) {
+            std::cerr << "Can't open default database: " << sqlite3_errmsg(db_) << '\n';
+            std::exit(1);
+        }
     }
 
     init_db();
     load_preferences();
-    load_chapters();
+    if (db_path_ != initial_db_path) {
+        switch_db(db_path_);
+    } else {
+        load_chapters();
+    }
 
     // build the user interface
 
@@ -223,6 +251,27 @@ JournalApp::JournalApp() {
         gtk_toolbar_insert(toolbar_, t, -1);
         gtk_widget_set_tooltip_text(GTK_WIDGET(t), "Export entry to Markdown");
         g_signal_connect(t, "clicked", G_CALLBACK(on_export_clicked), this);
+    }
+    // New Book button
+    {
+        GtkToolItem* t = gtk_tool_button_new(gtk_image_new_from_icon_name("document-new", GTK_ICON_SIZE_LARGE_TOOLBAR), "New Book");
+        gtk_toolbar_insert(toolbar_, t, -1);
+        gtk_widget_set_tooltip_text(GTK_WIDGET(t), "Create a new book database");
+        g_signal_connect(t, "clicked", G_CALLBACK(on_new_book_button_static), this);
+    }
+    // Open Book button
+    {
+        GtkToolItem* t = gtk_tool_button_new(gtk_image_new_from_icon_name("document-open", GTK_ICON_SIZE_LARGE_TOOLBAR), "Open Book");
+        gtk_toolbar_insert(toolbar_, t, -1);
+        gtk_widget_set_tooltip_text(GTK_WIDGET(t), "Open an existing book database");
+        g_signal_connect(t, "clicked", G_CALLBACK(on_open_book_button_static), this);
+    }
+    // Save As button
+    {
+        GtkToolItem* t = gtk_tool_button_new(gtk_image_new_from_icon_name("document-save-as", GTK_ICON_SIZE_LARGE_TOOLBAR), "Save As");
+        gtk_toolbar_insert(toolbar_, t, -1);
+        gtk_widget_set_tooltip_text(GTK_WIDGET(t), "Save book as a new database file");
+        g_signal_connect(t, "clicked", G_CALLBACK(on_save_as_button_static), this);
     }
     // New Chapter button
     {
@@ -536,6 +585,8 @@ void JournalApp::load_preferences() {
             saved_height_ = std::atoi(val);
         else if (strcmp(key, "pane_position") == 0 && val)
             saved_pane_pos_ = std::atoi(val);
+        else if (strcmp(key, "last_db_path") == 0)
+            db_path_ = val ? val : db_path_;
     }
     sqlite3_finalize(stmt);
 }
@@ -570,6 +621,30 @@ void JournalApp::save_preference(const std::string& key, const std::string& valu
     sqlite3_bind_text(stmt, 2, value.c_str(), -1, SQLITE_STATIC);
     sqlite3_step(stmt);
     sqlite3_finalize(stmt);
+}
+
+void JournalApp::switch_db(const std::string& new_path) {
+    sqlite3* new_db = nullptr;
+    if (sqlite3_open(new_path.c_str(), &new_db) != SQLITE_OK) {
+        std::cerr << "Can't open new database: " << sqlite3_errmsg(new_db) << '\n';
+        if (new_db) sqlite3_close(new_db);
+        return; // stay on current db
+    }
+    if (db_) {
+        sqlite3_close(db_);
+    }
+    db_ = new_db;
+    db_path_ = new_path;
+    // write to config file
+    std::string config_file = std::string(getenv("HOME")) + "/.aureus_last_db";
+    std::ofstream ofs(config_file);
+    ofs << db_path_ << std::endl;
+    init_db();
+    load_preferences();
+    load_chapters();
+    refresh_list();
+    new_entry();
+    save_preference("last_db_path", db_path_);
 }
 
 void JournalApp::apply_css() {
@@ -1183,6 +1258,15 @@ void JournalApp::on_delete_clicked(GtkButton* button, gpointer user_data) {
 void JournalApp::on_export_clicked(GtkButton* button, gpointer user_data) {
     static_cast<JournalApp*>(user_data)->export_entry();
 }
+void JournalApp::on_new_book_button_static(GtkButton* button, gpointer user_data) {
+    static_cast<JournalApp*>(user_data)->on_new_book();
+}
+void JournalApp::on_open_book_button_static(GtkButton* button, gpointer user_data) {
+    static_cast<JournalApp*>(user_data)->on_open_book();
+}
+void JournalApp::on_save_as_button_static(GtkButton* button, gpointer user_data) {
+    static_cast<JournalApp*>(user_data)->on_save_as();
+}
 void JournalApp::on_new_chapter_clicked(GtkButton* button, gpointer user_data) {
     static_cast<JournalApp*>(user_data)->create_chapter_dialog();
 }
@@ -1252,7 +1336,63 @@ void JournalApp::on_delete_chapter(GtkMenuItem* item, gpointer user_data) {
     app->delete_chapter_confirm(chapter_id);
 }
 
+void JournalApp::on_new_book() {
+    GtkWidget* dialog = gtk_file_chooser_dialog_new("New Book", GTK_WINDOW(window_), GTK_FILE_CHOOSER_ACTION_SAVE, "_Cancel", GTK_RESPONSE_CANCEL, "_Save", GTK_RESPONSE_ACCEPT, NULL);
+    GtkFileChooser* chooser = GTK_FILE_CHOOSER(dialog);
+    gtk_file_chooser_set_current_name(chooser, "new_book.db");
+    GtkFileFilter* filter = gtk_file_filter_new();
+    gtk_file_filter_set_name(filter, "Database files (*.db)");
+    gtk_file_filter_add_pattern(filter, "*.db");
+    gtk_file_chooser_add_filter(chooser, filter);
+    gtk_file_chooser_set_filter(chooser, filter);
+    if (gtk_dialog_run(GTK_DIALOG(dialog)) == GTK_RESPONSE_ACCEPT) {
+        char* filename = gtk_file_chooser_get_filename(chooser);
+        if (filename) {
+            std::string new_path = filename;
+            g_free(filename);
+            // Create new db
+            sqlite3* new_db;
+            if (sqlite3_open(new_path.c_str(), &new_db) == SQLITE_OK) {
+                // Seed with default chapters
+                const char* sql = "CREATE TABLE IF NOT EXISTS entries(id INTEGER PRIMARY KEY,title TEXT,content TEXT,tags TEXT,created TIMESTAMP,chapter_id INTEGER DEFAULT 1);";
+                sqlite3_exec(new_db, sql, 0, 0, 0);
+                sql = "CREATE TABLE IF NOT EXISTS chapters(id INTEGER PRIMARY KEY,title TEXT);";
+                sqlite3_exec(new_db, sql, 0, 0, 0);
+                sql = "CREATE TABLE IF NOT EXISTS prefs(key TEXT PRIMARY KEY, value TEXT);";
+                sqlite3_exec(new_db, sql, 0, 0, 0);
+                sql = "INSERT INTO chapters(title) VALUES('Journal'),('Articles'),('Random');";
+                sqlite3_exec(new_db, sql, 0, 0, 0);
+                sqlite3_close(new_db);
+                // Switch to it
+                switch_db(new_path);
+            }
+        }
+    }
+    gtk_widget_destroy(dialog);
+}
 
+void JournalApp::on_open_book() {
+    GtkWidget* dialog = gtk_file_chooser_dialog_new("Open Book", GTK_WINDOW(window_), GTK_FILE_CHOOSER_ACTION_OPEN, "_Cancel", GTK_RESPONSE_CANCEL, "_Open", GTK_RESPONSE_ACCEPT, NULL);
+    GtkFileChooser* chooser = GTK_FILE_CHOOSER(dialog);
+    GtkFileFilter* filter = gtk_file_filter_new();
+    gtk_file_filter_set_name(filter, "Database files (*.db)");
+    gtk_file_filter_add_pattern(filter, "*.db");
+    gtk_file_chooser_add_filter(chooser, filter);
+    gtk_file_chooser_set_filter(chooser, filter);
+    if (gtk_dialog_run(GTK_DIALOG(dialog)) == GTK_RESPONSE_ACCEPT) {
+        char* filename = gtk_file_chooser_get_filename(chooser);
+        if (filename) {
+            std::string new_path = filename;
+            g_free(filename);
+            switch_db(new_path);
+        }
+    }
+    gtk_widget_destroy(dialog);
+}
+
+void JournalApp::on_save_as() {
+    // Optional, implement later
+}
 
 
 

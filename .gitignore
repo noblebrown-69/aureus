@@ -5,7 +5,7 @@ Aureus
 
 # Database files
 *.db
-vibe_journal.db
+aureus.db
 
 # IDE/Editor files
 .vscode/
