@@ -56,6 +56,8 @@ private:
     GtkToolbar* toolbar_;
     GtkComboBoxText* font_size_combo_;
     GtkSwitch* dark_switch_;
+    GtkComboBoxText* theme_combo_;
+    GtkWidget* header_bar_;
     GtkCssProvider* css_provider_;
 
     std::vector<Chapter> chapters_;
@@ -66,6 +68,7 @@ private:
     bool unsaved_changes_ = false;
     bool dark_mode_ = false;
     std::string current_font_size_ = "12pt";
+    std::string current_theme = "Classic Blue";
     guint autosave_timer_id_ = 0;
     guint status_context_id_ = 0;
 
@@ -98,6 +101,7 @@ private:
     void update_statusbar();
     void update_font_size(const std::string& size);
     void autosave();
+    void on_theme_changed(GtkComboBoxText* combo, gpointer user_data);
     void highlight_search(const std::string& query);
     std::string sanitize_filename(const std::string& input);
     void create_chapter_dialog();
@@ -126,6 +130,7 @@ private:
     static void on_font_size_changed(GtkComboBoxText* combo, gpointer user_data);
     static void on_dark_switch_notify(GObject* object, GParamSpec* pspec,
                                       gpointer user_data);
+    static void on_theme_changed_static(GtkComboBoxText* combo, gpointer user_data);
     static void on_search_entry_changed(GtkSearchEntry* entry, gpointer user_data);
     static gboolean on_tree_button_press(GtkWidget* widget, GdkEventButton* event, gpointer user_data);
     static void on_drag_begin(GtkWidget* widget, GdkDragContext* context, gpointer user_data);
@@ -169,6 +174,13 @@ JournalApp::JournalApp() {
     gtk_style_context_add_provider_for_screen(gdk_screen_get_default(),
                                               GTK_STYLE_PROVIDER(css_provider_),
                                               GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+
+    // always use custom headerbar
+    header_bar_ = gtk_header_bar_new();
+    gtk_header_bar_set_show_close_button(GTK_HEADER_BAR(header_bar_), TRUE);
+    gtk_header_bar_set_title(GTK_HEADER_BAR(header_bar_), "Aureus");
+    gtk_widget_show(header_bar_);
+    gtk_window_set_titlebar(GTK_WINDOW(window_), header_bar_);
 
     apply_css();
 
@@ -265,6 +277,23 @@ JournalApp::JournalApp() {
     gtk_toolbar_insert(toolbar_, tswitch, -1);
     g_signal_connect(dark_switch_, "notify::active",
                      G_CALLBACK(on_dark_switch_notify), this);
+
+    // theme switcher
+    theme_combo_ = GTK_COMBO_BOX_TEXT(gtk_combo_box_text_new());
+    gtk_widget_set_tooltip_text(GTK_WIDGET(theme_combo_), "Select theme");
+    gtk_combo_box_text_append_text(theme_combo_, "Classic Blue");
+    gtk_combo_box_text_append_text(theme_combo_, "Leather Zibaldone");
+    if (current_theme == "Classic Blue")
+        gtk_combo_box_set_active(GTK_COMBO_BOX(theme_combo_), 0);
+    else if (current_theme == "Leather Zibaldone")
+        gtk_combo_box_set_active(GTK_COMBO_BOX(theme_combo_), 1);
+    else
+        gtk_combo_box_set_active(GTK_COMBO_BOX(theme_combo_), 0);
+    GtkToolItem* ttheme = gtk_tool_item_new();
+    gtk_container_add(GTK_CONTAINER(ttheme), GTK_WIDGET(theme_combo_));
+    gtk_toolbar_insert(toolbar_, ttheme, -1);
+    g_signal_connect(theme_combo_, "changed",
+                     G_CALLBACK(on_theme_changed_static), this);
 
     // layout: toolbar on top, paned split with resizable list on left and editor on right
 
@@ -499,6 +528,8 @@ void JournalApp::load_preferences() {
             dark_mode_ = (val && std::string(val) == "1");
         else if (strcmp(key, "font_size") == 0)
             current_font_size_ = val ? val : "12pt";
+        else if (strcmp(key, "theme") == 0)
+            current_theme = val ? val : "Classic Blue";
         else if (strcmp(key, "window_width") == 0 && val)
             saved_width_ = std::atoi(val);
         else if (strcmp(key, "window_height") == 0 && val)
@@ -542,17 +573,53 @@ void JournalApp::save_preference(const std::string& key, const std::string& valu
 }
 
 void JournalApp::apply_css() {
-    // build CSS string dynamically based on dark_mode_ and current_font_size_
-    std::string bg = dark_mode_ ? "#000000" : "#003366";
-    std::string fg = "#FFFFFF";
+    // build CSS string dynamically based on current_theme, dark_mode_ and current_font_size_
+    std::string bg, fg, editor_bg, editor_fg, button_bg, font_family;
+    if (current_theme == "Classic Blue") {
+        bg = dark_mode_ ? "#000000" : "#003366";
+        fg = "#FFFFFF";
+        editor_bg = bg;
+        editor_fg = fg;
+        button_bg = "#001F3F";
+        font_family = "monospace";
+    } else if (current_theme == "Leather Zibaldone") {
+        bg = "#3C2F2F";
+        fg = "#D4AF37";
+        editor_bg = "#F5E8C7";
+        editor_fg = "#000000";
+        button_bg = "#2A1F1F";
+        font_family = "Georgia, serif";
+    } else {
+        // fallback
+        bg = "#003366";
+        fg = "#FFFFFF";
+        editor_bg = bg;
+        editor_fg = fg;
+        button_bg = "#001F3F";
+        font_family = "monospace";
+    }
     std::string css =
         "window, treeview, statusbar { background-color: " + bg + "; color: " + fg + "; }\n"
-        "entry, textview text { background-color: " + bg + "; color: " + fg + "; "
-            "font-family: monospace; font-size: " + current_font_size_ + "; "
-            "border: 1px solid #FFFFFF; padding: 5px; }\n"
-        "button { background-color: #001F3F; color: " + fg + "; border-radius: 5px; }\n"
+        "entry { background-color: " + editor_bg + "; color: " + editor_fg + "; "
+            "font-family: " + font_family + "; font-size: " + current_font_size_ + "; "
+            "border: 1px solid " + fg + "; padding: 5px; }\n"
+        "textview { background-color: " + editor_bg + "; color: " + editor_fg + "; "
+            "font-family: " + font_family + "; font-size: " + current_font_size_ + "; }\n"
+        "textview text { background-color: " + editor_bg + "; color: " + editor_fg + "; "
+            "font-family: " + font_family + "; font-size: " + current_font_size_ + "; }\n"
+        "button { background-color: " + button_bg + "; color: " + fg + "; border-radius: 5px; }\n"
         "highlight { background-color: #FFFF00; color: #000000; }\n"
         "toolbar { padding: 5px; }\n";
+
+    if (current_theme == "Leather Zibaldone") {
+        css += "headerbar { background-color: #3C2F2F; color: #D4AF37; border-bottom: 2px solid #D4AF37; font-family: \"Georgia, serif\"; }\n"
+               "headerbar title { color: #D4AF37; font-weight: bold; }\n"
+               "toolbar { background-color: #8B6F47; color: #D4AF37; font-family: \"Georgia, serif\"; }\n";
+    } else {
+        css += "headerbar { background-color: #F0F0F0; color: #000000; border-bottom: 1px solid #CCCCCC; }\n"
+               "headerbar title { color: #000000; font-weight: normal; }\n"
+               "toolbar { background-color: transparent; }\n";
+    }
 
     // create a fresh provider each time to avoid accumulating rules
     GtkCssProvider* provider = gtk_css_provider_new();
@@ -1149,6 +1216,22 @@ void JournalApp::on_dark_switch_notify(GObject* object, GParamSpec* pspec,
     app->dark_mode_ = active;
     app->apply_css();
     app->save_preference("dark_mode", active ? "1" : "0");
+}
+
+void JournalApp::on_theme_changed_static(GtkComboBoxText* combo, gpointer user_data) {
+    JournalApp* app = static_cast<JournalApp*>(user_data);
+    app->on_theme_changed(combo, user_data);
+}
+
+void JournalApp::on_theme_changed(GtkComboBoxText* combo, gpointer user_data) {
+    gchar* theme = gtk_combo_box_text_get_active_text(combo);
+    if (theme) {
+        current_theme = theme;
+        apply_css();
+        save_preference("theme", theme);
+
+        g_free(theme);
+    }
 }
 
 void JournalApp::on_search_entry_changed(GtkSearchEntry* entry, gpointer user_data) {
